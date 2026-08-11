@@ -1,0 +1,1961 @@
+cat("\014")
+rm(list = ls())
+gc() 
+
+
+
+## ============================================================
+## 1. Libraries laden
+## ============================================================
+
+library("DescTools")
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(readxl)
+library(stringr)
+library(openxlsx)
+library(rpart)
+
+
+## ============================================================
+## 2. Einstellungen
+## ============================================================
+
+# Dezimaltrennzeichen auf Komma setzen
+options(OutDec = ',')
+
+# Auswertungszeitraum
+start_date <- as.Date("2008-01-01")
+end_date   <- as.Date("2025-12-31")
+
+# Flooring / Kappung CCF
+min_CCF <- 0
+max_CCF <- 5
+
+
+## ============================================================
+## CART-Einstellungen
+##
+## minsplit:
+## Mindestanzahl Beobachtungen in einem Knoten, ## bevor ein weiterer Split versucht wird.
+##
+## minbucket:
+## Mindestanzahl Beobachtungen je resultierender Klasse.
+##
+## maxdepth:
+## Maximale Tiefe des CART-Baumes.
+## ============================================================
+
+CART_minsplit  <- 50
+CART_minbucket <- 25
+CART_maxdepth  <- 5
+
+
+## ============================================================
+## 3. Verknüpfungen zu den Eingabedaten definieren ## ============================================================
+
+EFLIn <- "~/LGD CCF Modellierung/Regulatorisch vs Realisiert/EFL_LGD_CCF_inkl_NonRetail_BT_2026_V100_20050550.xlsx"
+
+RVLIn <- "~/LGD CCF Modellierung/Regulatorisch vs Realisiert/RVL_FMR_VS_20251231_v095_DQ_20050550.xlsx"
+
+
+## ============================================================
+## 4. EFL-Tabellenblatt automatisch bestimmen
+##
+## Falls das Blatt exakt "EFL" heißt, wird dieses verwendet.
+## Falls nicht, wird das erste Blatt verwendet,
+## dessen Name mit "EFL" beginnt.
+## ============================================================
+
+EFL_sheets <- excel_sheets(EFLIn)
+
+if ("EFL" %in% EFL_sheets) {
+  
+  EFL_sheet <- "EFL"
+  
+} else {
+  
+  EFL_candidates <- EFL_sheets[
+    str_detect(
+      EFL_sheets,
+      "^EFL"
+    )
+  ]
+  
+  if (length(EFL_candidates) == 0) {
+    
+    stop(
+      "Es wurde kein Tabellenblatt gefunden, dessen Name mit 'EFL' 
+beginnt."
+    )
+    
+  }
+  
+  EFL_sheet <- EFL_candidates[1]
+}
+
+
+cat("\n")
+cat("Verwendetes EFL-Tabellenblatt:", EFL_sheet, "\n")
+
+
+## ============================================================
+## 5. Daten einlesen
+## ============================================================
+
+Konten <- read_xlsx(
+  EFLIn,
+  sheet = EFL_sheet
+)
+
+Konten_LGD <- read_xlsx(
+  EFLIn,
+  sheet = EFL_sheet
+)
+
+RVL_Pers <- read_xlsx(
+  RVLIn,
+  sheet = "2. Vorgang - Person",
+  skip = 11
+)
+
+RVL_Konto <- read_xlsx(
+  RVLIn,
+  sheet = "3. Vorgang - Konto",
+  skip = 11
+)
+
+
+## ============================================================
+## 6. Schlüsselspalten auf Character setzen
+## ============================================================
+
+Konten$Vorgang       <- as.character(Konten$Vorgang)
+Konten$Person        <- as.character(Konten$Person)
+Konten$KontoID       <- as.character(Konten$KontoID)
+Konten$FzveID        <- as.character(Konten$FzveID)
+
+Konten_LGD$Vorgang   <- as.character(Konten_LGD$Vorgang)
+Konten_LGD$KontoID   <- as.character(Konten_LGD$KontoID)
+Konten_LGD$FzveID    <- as.character(Konten_LGD$FzveID)
+
+RVL_Pers$Vorgang     <- as.character(RVL_Pers$Vorgang)
+
+RVL_Konto$Vorgang    <- as.character(RVL_Konto$Vorgang)
+RVL_Konto$KontoID    <- as.character(RVL_Konto$KontoID)
+RVL_Konto$FzveID     <- as.character(RVL_Konto$FzveID)
+
+
+## ============================================================
+## 7. Benötigte Spalten auswählen
+##
+## Neu wichtig für CART:
+##
+## Nenner_CCF
+## Kontoklasse
+## ZuslIAKonto
+## ============================================================
+
+keep <- c(
+  "Vorgang",
+  "Person",
+  "KontoID",
+  "FzveID",
+  "Ratingsystem",
+  "Kontoklasse",
+  "Datum_erster_Snapshot",
+  "VERW_CCF",
+  "CCF",
+  "Nenner_CCF",
+  "PersonenKlasse",
+  "Verwendet_Aggregation",
+  "ZuslIAKonto"
+)
+
+Konten <- subset(
+  Konten,
+  select = keep
+)
+
+
+keep <- c(
+  "Vorgang",
+  "KontoID",
+  "FzveID",
+  "RetailKontoKlasse"
+)
+
+Konten_LGD <- subset(
+  Konten_LGD,
+  select = keep
+)
+
+
+keep <- c(
+  "Vorgang",
+  "KontoID",
+  "FzveID",
+  "7311 VGNG",
+  "7312 VGNG",
+  "7371 VGNG"
+)
+
+RVL_Konto <- subset(
+  RVL_Konto,
+  select = keep
+)
+
+
+keep <- c(
+  "Vorgang"
+)
+
+RVL_Pers <- subset(
+  RVL_Pers,
+  select = keep
+)
+
+
+## ============================================================
+## 8. Datensätze zusammenführen
+## ============================================================
+
+df <- left_join(
+  Konten,
+  RVL_Pers,
+  by = "Vorgang"
+)
+
+df <- left_join(
+  df,
+  RVL_Konto,
+  by = c(
+    "Vorgang",
+    "KontoID",
+    "FzveID"
+  )
+)
+
+df <- left_join(
+  df,
+  Konten_LGD,
+  by = c(
+    "Vorgang",
+    "KontoID",
+    "FzveID"
+  )
+)
+
+
+## ============================================================
+## 9. Hilfsfunktion:
+## numerische Werte robust umwandeln
+##
+## Damit funktionieren sowohl echte numerische Excel-Werte
+## als auch Werte mit deutschem Dezimalkomma.
+## ============================================================
+
+to_numeric_safe <- function(x) {
+  
+  if (is.numeric(x)) {
+    return(as.numeric(x))
+  }
+  
+  x <- as.character(x)
+  x <- trimws(x)
+  
+  x[
+    x %in% c(
+      "",
+      "-",
+      "NA",
+      "N/A",
+      "NULL"
+    )
+  ] <- NA
+  
+  # Falls ein Komma vorkommt:
+  # deutsches Zahlenformat unterstellen
+  hat_komma <- grepl(
+    ",",
+    x,
+    fixed = TRUE
+  )
+  
+  # Punkte als mögliche Tausendertrennzeichen entfernen
+  x[hat_komma] <- gsub(
+    "\\.",
+    "",
+    x[hat_komma]
+  )
+  
+  # Dezimalkomma durch Punkt ersetzen
+  x[hat_komma] <- gsub(
+    ",",
+    ".",
+    x[hat_komma],
+    fixed = TRUE
+  )
+  
+  suppressWarnings(
+    as.numeric(x)
+  )
+}
+
+
+## ============================================================
+## 10. Numerische CART-Variablen aufbereiten
+## ============================================================
+
+df <- df %>%
+  mutate(
+    
+    CCF = to_numeric_safe(CCF),
+    
+    Verwendet_Aggregation =
+      to_numeric_safe(
+        Verwendet_Aggregation
+      ),
+    
+    Nenner_CCF =
+      to_numeric_safe(
+        Nenner_CCF
+      ),
+    
+    ZuslIAKonto =
+      to_numeric_safe(
+        ZuslIAKonto
+      )
+  )
+
+
+## ------------------------------------------------------------
+## Zeilen mit Nenner_CCF = 0 direkt herausfiltern
+## ------------------------------------------------------------
+
+df <- df %>%
+  filter(
+    Nenner_CCF != 0
+  )
+
+
+## ============================================================
+## 11. CCF_neu weiterhin berechnen
+##
+## Wie im bisherigen Programm.
+## Für die CART-Analyse wird anschließend CCF_real verwendet.
+## ============================================================
+
+df <- df %>%
+  mutate(
+    
+    CCF_neu = if_else(
+      
+      !is.na(Verwendet_Aggregation) &
+        Verwendet_Aggregation != 0,
+      
+      CCF / Verwendet_Aggregation,
+      
+      NA_real_
+    )
+  )
+
+
+## ============================================================
+## 12. Datum aufbereiten
+## ============================================================
+
+df$Datum_erster_Snapshot <- as.character(
+  df$Datum_erster_Snapshot
+)
+
+df$Year <- as.numeric(
+  substr(
+    df$Datum_erster_Snapshot,
+    1,
+    4
+  )
+)
+
+df$Date <- as.Date(
+  df$Datum_erster_Snapshot,
+  format = "%Y-%m-%d"
+)
+
+
+## ============================================================
+## 13. Ratingsystem definieren
+##
+## WICHTIG:
+## direkt aus der vorhandenen Spalte Ratingsystem
+## ============================================================
+
+df <- df %>%
+  mutate(
+    
+    RS = as.character(
+      Ratingsystem
+    ),
+    
+    RS = trimws(RS),
+    
+    RS = toupper(RS)
+  )
+
+
+## ============================================================
+## Kontrolle Ratingsystem
+## ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("Ratingsystem vor Filterung\n")
+cat("============================================\n")
+
+print(
+  table(
+    df$RS,
+    useNA = "ifany"
+  )
+)
+
+
+## ============================================================
+## 14. Non-Retail-Flag definieren
+## ============================================================
+
+df$nonretail_rvl <- ifelse(
+  
+  df$RetailKontoKlasse %in% c(
+    "Non-Retail-Forderung"
+  ),
+  
+  1,
+  0
+)
+
+
+## ============================================================
+## 15. Ausschlüsse / Filter anwenden
+## ============================================================
+
+df1 <- df
+
+
+## ------------------------------------------------------------
+## Nur Non-Retail
+## ------------------------------------------------------------
+
+df1 <- df1[
+  df1$nonretail_rvl != 0,
+]
+
+
+## ------------------------------------------------------------
+## Nenner CCF mindestens 1
+## ------------------------------------------------------------
+
+df1 <- df1 %>%
+  filter(
+    Nenner_CCF >= 1
+  )
+
+
+## ------------------------------------------------------------
+## Zeitraum
+## ------------------------------------------------------------
+
+df1 <- df1 %>%
+  filter(
+    Date >= start_date &
+      Date <= end_date
+  )
+
+
+## ------------------------------------------------------------
+## Nur STR und SIR
+## ------------------------------------------------------------
+
+df1 <- df1 %>%
+  filter(
+    RS %in% c(
+      "STR",
+      "SIR"
+    )
+  )
+
+
+## ------------------------------------------------------------
+## Nur Fälle mit vorhandenem CCF
+## ------------------------------------------------------------
+
+df1 <- df1 %>%
+  filter(
+    !is.na(CCF)
+  )
+
+
+## ------------------------------------------------------------
+## Kontoklassen ausschließen, die nicht für CART verwendet
+## werden sollen
+## ------------------------------------------------------------
+
+df1 <- df1 %>%
+  filter(
+    !Kontoklasse %in% c(
+      "Keine Kontoklasse",
+      "Baufinanzierung",
+      "Investitionskredit",
+      "Allzweckdarlehen"
+    )
+  )
+
+
+## ============================================================
+## 16. CCF_real erstellen
+##
+## Flooring und Kappung wie bisher
+## ============================================================
+
+df1$CCF_real <- as.numeric(
+  df1$CCF
+)
+
+
+## Flooring
+
+df1$CCF_real[
+  df1$CCF_real < min_CCF
+] <- min_CCF
+
+
+## Kappung
+
+df1$CCF_real[
+  df1$CCF_real > max_CCF
+] <- max_CCF
+
+
+## ============================================================
+## 17. RVL-Regeln Datenaufbereitung
+## ============================================================
+
+# Aktuell keine weiteren RVL-Regeln aktiviert
+
+# Beispiel:
+
+# df1$regel_7311 <- ifelse(
+#   is.na(df1$`7311 VGNG`),
+#   0,
+#   ifelse(
+#     df1$`7311 VGNG` == "X",
+#     1,
+#     0
+#   )
+# )
+
+
+df2 <- df1
+
+
+## ============================================================
+## 18. RVL-Regeln anwenden
+## ============================================================
+
+# Aktuell keine Regeln ausgeschlossen
+
+# Beispiel:
+
+# df2 <- filter(
+#   df2,
+#   regel_7311 == 0
+# )
+
+
+## ============================================================
+## 19. Kontoklasse für CART als Faktor definieren
+## ============================================================
+
+df2$Kontoklasse <- as.factor(
+  df2$Kontoklasse
+)
+
+
+## ============================================================
+## 20. Kontrolle der CART-Datenbasis
+## ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("Anzahl Fälle CART-Datenbasis\n")
+cat("============================================\n")
+
+print(
+  table(
+    df2$RS,
+    useNA = "ifany"
+  )
+)
+
+
+cat("\n")
+cat("============================================\n")
+cat("Kontoklassen\n")
+cat("============================================\n")
+
+print(
+  table(
+    df2$Kontoklasse,
+    useNA = "ifany"
+  )
+)
+
+
+cat("\n")
+cat("============================================\n")
+cat("Zusammenfassung Nenner_CCF\n")
+cat("============================================\n")
+
+print(
+  summary(
+    df2$Nenner_CCF
+  )
+)
+
+
+cat("\n")
+cat("============================================\n")
+cat("Zusammenfassung zusätzliche Inanspruchnahme\n")
+cat("============================================\n")
+
+print(
+  summary(
+    df2$ZuslIAKonto
+  )
+)
+
+
+## ============================================================
+## 21. Funktion:
+## R² einer CART-Aufteilung berechnen
+##
+## Zeigt, wie viel der CCF-Streuung durch die gebildeten
+## CART-Klassen erklärt wird.
+##
+## Je höher, desto trennschärfer.
+## ============================================================
+
+calc_tree_r2 <- function(y, node) {
+  
+  SST <- sum(
+    (y - mean(y))^2
+  )
+  
+  if (SST == 0) {
+    return(0)
+  }
+  
+  node_mean <- ave(
+    y,
+    node,
+    FUN = mean
+  )
+  
+  SSE <- sum(
+    (y - node_mean)^2
+  )
+  
+  1 - SSE / SST
+}
+
+
+## ============================================================
+## 22. Funktion:
+## Terminale CART-Klassen zusammenfassen
+## ============================================================
+
+create_leaf_summary <- function(
+    tree,
+    dat,
+    predictor,
+    gruppe
+) {
+  
+  node_numbers <- as.integer(
+    row.names(
+      tree$frame
+    )
+  )
+  
+  dat$CART_Node <- node_numbers[
+    tree$where
+  ]
+  
+  
+  ## ----------------------------------------------------------
+  ## Numerische Variable
+  ## ----------------------------------------------------------
+  
+  if (
+    is.numeric(
+      dat[[predictor]]
+    )
+  ) {
+    
+    result <- dat %>%
+      group_by(
+        CART_Node
+      ) %>%
+      summarise(
+        
+        Gruppe = gruppe,
+        
+        Variable = predictor,
+        
+        Anzahl = n(),
+        
+        Min_Praediktor =
+          min(
+            .data[[predictor]],
+            na.rm = TRUE
+          ),
+        
+        Max_Praediktor =
+          max(
+            .data[[predictor]],
+            na.rm = TRUE
+          ),
+        
+        Mittel_Praediktor =
+          mean(
+            .data[[predictor]],
+            na.rm = TRUE
+          ),
+        
+        Mittelwert_CCF =
+          mean(
+            CCF_real,
+            na.rm = TRUE
+          ),
+        
+        Median_CCF =
+          median(
+            CCF_real,
+            na.rm = TRUE
+          ),
+        
+        SD_CCF =
+          sd(
+            CCF_real,
+            na.rm = TRUE
+          ),
+        
+        .groups = "drop"
+      ) %>%
+      arrange(
+        Min_Praediktor
+      )
+    
+  } else {
+    
+    
+    ## --------------------------------------------------------
+    ## Kategoriale Variable
+    ## --------------------------------------------------------
+    
+    result <- dat %>%
+      group_by(
+        CART_Node
+      ) %>%
+      summarise(
+        
+        Gruppe = gruppe,
+        
+        Variable = predictor,
+        
+        Anzahl = n(),
+        
+        Auspraegungen =
+          paste(
+            sort(
+              unique(
+                as.character(
+                  .data[[predictor]]
+                )
+              )
+            ),
+            collapse = " | "
+          ),
+        
+        Mittelwert_CCF =
+          mean(
+            CCF_real,
+            na.rm = TRUE
+          ),
+        
+        Median_CCF =
+          median(
+            CCF_real,
+            na.rm = TRUE
+          ),
+        
+        SD_CCF =
+          sd(
+            CCF_real,
+            na.rm = TRUE
+          ),
+        
+        .groups = "drop"
+      )
+  }
+  
+  
+  return(result)
+}
+
+
+## ============================================================
+## 23. Hauptfunktion CART
+##
+## Diese Funktion führt für EINE Variable eine komplette
+## CART-Analyse durch.
+##
+## Es werden zwei Analysen gerechnet:
+##
+## 1. CART-Stumpf mit maximal einem Split
+##    -> zeigt den größten einzelnen Bruch
+##
+## 2. vollständiger CART-Baum
+##    -> zeigt mögliche sinnvolle Klassen
+##
+## Der vollständige Baum wird mittels Cross Validation
+## auf den CP mit minimalem xerror zurückgeschnitten.
+## ============================================================
+
+run_cart_analysis <- function(
+    dat,
+    predictor,
+    gruppe,
+    minsplit = CART_minsplit,
+    minbucket = CART_minbucket,
+    maxdepth = CART_maxdepth
+) {
+  
+  
+  ## ----------------------------------------------------------
+  ## Nur benötigte Variablen
+  ## ----------------------------------------------------------
+  
+  dat_cart <- dat %>%
+    select(
+      CCF_real,
+      all_of(predictor)
+    ) %>%
+    filter(
+      !is.na(CCF_real),
+      !is.na(.data[[predictor]])
+    )
+  
+  
+  ## ----------------------------------------------------------
+  ## Faktor sauber aufbereiten
+  ## ----------------------------------------------------------
+  
+  if (
+    !is.numeric(
+      dat_cart[[predictor]]
+    )
+  ) {
+    
+    dat_cart[[predictor]] <-
+      droplevels(
+        as.factor(
+          dat_cart[[predictor]]
+        )
+      )
+  }
+  
+  
+  ## ----------------------------------------------------------
+  ## Unendliche Werte bei numerischen Variablen entfernen
+  ## ----------------------------------------------------------
+  
+  if (
+    is.numeric(
+      dat_cart[[predictor]]
+    )
+  ) {
+    
+    dat_cart <- dat_cart[
+      is.finite(
+        dat_cart[[predictor]]
+      ),
+    ]
+  }
+  
+  
+  dat_cart <- dat_cart[
+    is.finite(
+      dat_cart$CCF_real
+    ),
+  ]
+  
+  
+  ## ----------------------------------------------------------
+  ## Prüfen, ob genügend Daten vorhanden sind
+  ## ----------------------------------------------------------
+  
+  if (
+    nrow(dat_cart) <
+    2 * minbucket
+  ) {
+    
+    warning(
+      paste(
+        gruppe,
+        predictor,
+        ": zu wenige Beobachtungen für CART."
+      )
+    )
+    
+    return(NULL)
+  }
+  
+  
+  if (
+    length(
+      unique(
+        dat_cart[[predictor]]
+      )
+    ) < 2
+  ) {
+    
+    warning(
+      paste(
+        gruppe,
+        predictor,
+        ": Predictor besitzt nur eine Ausprägung."
+      )
+    )
+    
+    return(NULL)
+  }
+  
+  
+  ## ----------------------------------------------------------
+  ## Formel
+  ## ----------------------------------------------------------
+  
+  form <- reformulate(
+    predictor,
+    response = "CCF_real"
+  )
+  
+  
+  ## ==========================================================
+  ## A. STÄRKSTER EINZELNER BRUCH
+  ##
+  ## maxdepth = 1
+  ##
+  ## Dadurch darf CART genau EINEN Split bilden.
+  ## Dieser Split ist die trennschärfste Zweiteilung
+  ## hinsichtlich des mittleren CCF.
+  ## ==========================================================
+  
+  tree_stump <- rpart(
+    
+    formula = form,
+    
+    data = dat_cart,
+    
+    method = "anova",
+    
+    model = TRUE,
+    
+    control = rpart.control(
+      
+      cp = 0,
+      
+      minsplit = minsplit,
+      
+      minbucket = minbucket,
+      
+      maxdepth = 1,
+      
+      maxcompete = 0,
+      
+      maxsurrogate = 0,
+      
+      usesurrogate = 0,
+      
+      xval = 0
+    )
+  )
+  
+  
+  ## ----------------------------------------------------------
+  ## Klassen des stärksten einzelnen Splits
+  ## ----------------------------------------------------------
+  
+  stump_classes <- create_leaf_summary(
+    tree = tree_stump,
+    dat = dat_cart,
+    predictor = predictor,
+    gruppe = gruppe
+  )
+  
+  
+  ## ----------------------------------------------------------
+  ## Hat CART tatsächlich gesplittet?
+  ## ----------------------------------------------------------
+  
+  stump_split_found <-
+    nrow(
+      tree_stump$frame
+    ) > 1
+  
+  
+  ## ----------------------------------------------------------
+  ## Grenzwert bei numerischen Variablen
+  ## ----------------------------------------------------------
+  
+  stump_cut <- NA_real_
+  
+  if (
+    stump_split_found &&
+    is.numeric(
+      dat_cart[[predictor]]
+    ) &&
+    !is.null(
+      tree_stump$splits
+    )
+  ) {
+    
+    stump_cut <-
+      as.numeric(
+        tree_stump$splits[
+          1,
+          "index"
+        ]
+      )
+  }
+  
+  
+  ## ----------------------------------------------------------
+  ## R² des einzelnen Splits
+  ## ----------------------------------------------------------
+  
+  node_numbers_stump <- as.integer(
+    row.names(
+      tree_stump$frame
+    )
+  )
+  
+  node_stump <-
+    node_numbers_stump[
+      tree_stump$where
+    ]
+  
+  stump_r2 <- calc_tree_r2(
+    dat_cart$CCF_real,
+    node_stump
+  )
+  
+  
+  ## ----------------------------------------------------------
+  ## CCF-Sprung zwischen den zwei Klassen
+  ## ----------------------------------------------------------
+  
+  if (
+    nrow(stump_classes) >= 2
+  ) {
+    
+    ccf_jump <-
+      max(
+        stump_classes$Mittelwert_CCF,
+        na.rm = TRUE
+      ) -
+      min(
+        stump_classes$Mittelwert_CCF,
+        na.rm = TRUE
+      )
+    
+  } else {
+    
+    ccf_jump <- 0
+  }
+  
+  
+  ## ==========================================================
+  ## B. VOLLSTÄNDIGER CART-BAUM
+  ##
+  ## Dieser darf mehrere Grenzwerte / Klassen bestimmen.
+  ## ==========================================================
+  
+  tree_full <- rpart(
+    
+    formula = form,
+    
+    data = dat_cart,
+    
+    method = "anova",
+    
+    model = TRUE,
+    
+    control = rpart.control(
+      
+      cp = 0,
+      
+      minsplit = minsplit,
+      
+      minbucket = minbucket,
+      
+      maxdepth = maxdepth,
+      
+      maxcompete = 0,
+      
+      maxsurrogate = 0,
+      
+      usesurrogate = 0,
+      
+      xval = 10
+    )
+  )
+  
+  
+  ## ==========================================================
+  ## Cross Validation:
+  ## optimalen CP anhand des kleinsten xerror bestimmen
+  ## ==========================================================
+  
+  if (
+    !is.null(
+      tree_full$cptable
+    ) &&
+    nrow(
+      tree_full$cptable
+    ) > 0
+  ) {
+    
+    best_row <- which.min(
+      tree_full$cptable[
+        ,
+        "xerror"
+      ]
+    )
+    
+    best_cp <-
+      tree_full$cptable[
+        best_row,
+        "CP"
+      ]
+    
+  } else {
+    
+    best_cp <- 0
+  }
+  
+  
+  ## ==========================================================
+  ## Baum zurückschneiden
+  ## ==========================================================
+  
+  tree_pruned <- prune(
+    tree_full,
+    cp = best_cp
+  )
+  
+  
+  ## ==========================================================
+  ## Klassen aus dem finalen CART-Baum
+  ## ==========================================================
+  
+  tree_classes <- create_leaf_summary(
+    tree = tree_pruned,
+    dat = dat_cart,
+    predictor = predictor,
+    gruppe = gruppe
+  )
+  
+  
+  ## ==========================================================
+  ## R² des finalen CART-Baumes
+  ## ==========================================================
+  
+  node_numbers_tree <- as.integer(
+    row.names(
+      tree_pruned$frame
+    )
+  )
+  
+  node_tree <-
+    node_numbers_tree[
+      tree_pruned$where
+    ]
+  
+  tree_r2 <- calc_tree_r2(
+    dat_cart$CCF_real,
+    node_tree
+  )
+  
+  
+  ## ==========================================================
+  ## Anzahl CART-Klassen
+  ## ==========================================================
+  
+  number_classes <-
+    sum(
+      tree_pruned$frame$var ==
+        "<leaf>"
+    )
+  
+  
+  ## ==========================================================
+  ## Alle numerischen Splitpunkte des finalen Baumes
+  ## ==========================================================
+  
+  if (
+    is.numeric(
+      dat_cart[[predictor]]
+    ) &&
+    !is.null(
+      tree_pruned$splits
+    ) &&
+    nrow(
+      tree_pruned$splits
+    ) > 0
+  ) {
+    
+    split_points <- data.frame(
+      
+      Gruppe = gruppe,
+      
+      Variable = predictor,
+      
+      Split_Nr =
+        seq_len(
+          nrow(
+            tree_pruned$splits
+          )
+        ),
+      
+      Grenzwert =
+        as.numeric(
+          tree_pruned$splits[
+            ,
+            "index"
+          ]
+        ),
+      
+      Verbesserung =
+        as.numeric(
+          tree_pruned$splits[
+            ,
+            "improve"
+          ]
+        )
+    )
+    
+    split_points <-
+      split_points %>%
+      arrange(
+        Grenzwert
+      )
+    
+  } else {
+    
+    split_points <- data.frame(
+      
+      Gruppe = gruppe,
+      
+      Variable = predictor,
+      
+      Split_Nr = NA_integer_,
+      
+      Grenzwert = NA_real_,
+      
+      Verbesserung = NA_real_
+    )
+  }
+  
+  
+  ## ==========================================================
+  ## CP-Tabelle
+  ## ==========================================================
+  
+  cp_table <-
+    as.data.frame(
+      tree_full$cptable
+    )
+  
+  cp_table$Gruppe <- gruppe
+  cp_table$Variable <- predictor
+  
+  cp_table <-
+    cp_table %>%
+    select(
+      Gruppe,
+      Variable,
+      everything()
+    )
+  
+  
+  ## ==========================================================
+  ## Übersicht stärkster Bruch
+  ## ==========================================================
+  
+  overview <- data.frame(
+    
+    Gruppe = gruppe,
+    
+    Variable = predictor,
+    
+    Anzahl_Faelle = nrow(dat_cart),
+    
+    Split_gefunden = stump_split_found,
+    
+    Staerkster_Grenzwert = stump_cut,
+    
+    CCF_Sprung = ccf_jump,
+    
+    R2_ein_Split = stump_r2,
+    
+    Optimales_CP = best_cp,
+    
+    Anzahl_CART_Klassen =
+      number_classes,
+    
+    R2_finaler_CART =
+      tree_r2
+  )
+  
+  
+  ## ==========================================================
+  ## Ergebnis zurückgeben
+  ## ==========================================================
+  
+  return(
+    list(
+      
+      overview = overview,
+      
+      stump_classes = stump_classes,
+      
+      tree_classes = tree_classes,
+      
+      split_points = split_points,
+      
+      cp_table = cp_table,
+      
+      stump = tree_stump,
+      
+      tree = tree_pruned
+    )
+  )
+}
+
+
+## ============================================================
+## 24. Untersuchungsgruppen definieren
+##
+## Es werden automatisch drei Analysen durchgeführt:
+##
+## 1. GESAMT
+## 2. STR
+## 3. SIR
+##
+## Falls nur GESAMT gewünscht ist:
+##
+## gruppen <- list(
+##   GESAMT = df2
+## )
+## ============================================================
+
+gruppen <- list(
+  
+  GESAMT = df2,
+  
+  STR = df2 %>%
+    filter(
+      RS == "STR"
+    ),
+  
+  SIR = df2 %>%
+    filter(
+      RS == "SIR"
+    )
+)
+
+
+## ============================================================
+## 25. CART-Variablen definieren
+## ============================================================
+
+cart_variablen <- c(
+  
+  "Nenner_CCF",
+  
+  "Kontoklasse",
+  
+  "ZuslIAKonto"
+)
+
+
+## ============================================================
+## Kurznamen für Dateien / Ausgaben
+## ============================================================
+
+variable_short <- c(
+  
+  Nenner_CCF = "Nenner",
+  
+  Kontoklasse = "Kontoklasse",
+  
+  ZuslIAKonto = "ZuslIA"
+)
+
+
+## ============================================================
+## 26. Ergebnislisten vorbereiten
+## ============================================================
+
+all_overview <- list()
+
+all_stump_classes <- list()
+
+all_tree_classes <- list()
+
+all_split_points <- list()
+
+all_cp_tables <- list()
+
+all_models <- list()
+
+
+## ============================================================
+## 27. CART-Analysen durchführen
+## ============================================================
+
+counter <- 1
+
+
+for (
+  gruppe_name in names(gruppen)
+) {
+  
+  dat_gruppe <-
+    gruppen[[gruppe_name]]
+  
+  
+  for (
+    predictor in cart_variablen
+  ) {
+    
+    cat("\n")
+    cat("============================================\n")
+    cat("CART-Analyse\n")
+    cat("Gruppe   :", gruppe_name, "\n")
+    cat("Variable :", predictor, "\n")
+    cat("============================================\n")
+    
+    
+    result <- run_cart_analysis(
+      
+      dat = dat_gruppe,
+      
+      predictor = predictor,
+      
+      gruppe = gruppe_name
+    )
+    
+    
+    if (
+      !is.null(result)
+    ) {
+      
+      all_overview[[counter]] <-
+        result$overview
+      
+      all_stump_classes[[counter]] <-
+        result$stump_classes
+      
+      all_tree_classes[[counter]] <-
+        result$tree_classes
+      
+      all_split_points[[counter]] <-
+        result$split_points
+      
+      all_cp_tables[[counter]] <-
+        result$cp_table
+      
+      
+      model_name <- paste(
+        gruppe_name,
+        variable_short[
+          predictor
+        ],
+        sep = "_"
+      )
+      
+      all_models[[model_name]] <-
+        result
+      
+      
+      counter <- counter + 1
+    }
+  }
+}
+
+
+## ============================================================
+## 28. Alle Ergebnistabellen zusammenführen
+## ============================================================
+
+CART_Uebersicht <- bind_rows(
+  all_overview
+)
+
+CART_Staerkster_Bruch <- bind_rows(
+  all_stump_classes
+)
+
+CART_Klassen <- bind_rows(
+  all_tree_classes
+)
+
+CART_Splitpunkte <- bind_rows(
+  all_split_points
+)
+
+CART_CP <- bind_rows(
+  all_cp_tables
+)
+
+
+## ============================================================
+## 29. Übersicht sortieren
+## ============================================================
+
+CART_Uebersicht <- CART_Uebersicht %>%
+  arrange(
+    
+    factor(
+      Gruppe,
+      levels = c(
+        "GESAMT",
+        "STR",
+        "SIR"
+      )
+    ),
+    
+    factor(
+      Variable,
+      levels = c(
+        "Nenner_CCF",
+        "Kontoklasse",
+        "ZuslIAKonto"
+      )
+    )
+  )
+
+
+## ============================================================
+## 30. Ergebnisse in RStudio anzeigen
+## ============================================================
+
+cat("\n")
+cat("====================================================\n")
+cat("CART - ÜBERSICHT DER STÄRKSTEN BRÜCHE\n")
+cat("====================================================\n")
+
+print(
+  CART_Uebersicht
+)
+
+
+cat("\n")
+cat("====================================================\n")
+cat("STÄRKSTER EINZELNER SPLIT - KLASSEN\n")
+cat("====================================================\n")
+
+print(
+  CART_Staerkster_Bruch
+)
+
+
+cat("\n")
+cat("====================================================\n")
+cat("FINALE CART-KLASSEN\n")
+cat("====================================================\n")
+
+print(
+  CART_Klassen
+)
+
+
+cat("\n")
+cat("====================================================\n")
+cat("ALLE NUMERISCHEN CART-GRENZWERTE\n")
+cat("====================================================\n")
+
+print(
+  CART_Splitpunkte
+)
+
+
+## ============================================================
+## 31. Excel-Datei erstellen
+## ============================================================
+
+output_file <-
+  "~/LGD CCF Modellierung/Regulatorisch vs Realisiert/CART_CCF_Analyse_ohne CCF_Nenner 0 ohne 4 Ausp.xlsx"
+
+
+wb <- createWorkbook()
+
+
+## ============================================================
+## Tabellenblatt 1: Übersicht
+## ============================================================
+
+addWorksheet(
+  wb,
+  "Uebersicht"
+)
+
+writeData(
+  wb,
+  "Uebersicht",
+  CART_Uebersicht
+)
+
+
+## ============================================================
+## Tabellenblatt 2:
+## Klassen des stärksten einzelnen Bruchs
+## ============================================================
+
+addWorksheet(
+  wb,
+  "Staerkster_Bruch"
+)
+
+writeData(
+  wb,
+  "Staerkster_Bruch",
+  CART_Staerkster_Bruch
+)
+
+
+## ============================================================
+## Tabellenblatt 3:
+## Klassen des finalen CART-Baumes
+## ============================================================
+
+addWorksheet(
+  wb,
+  "CART_Klassen"
+)
+
+writeData(
+  wb,
+  "CART_Klassen",
+  CART_Klassen
+)
+
+
+## ============================================================
+## Tabellenblatt 4:
+## alle numerischen Splitpunkte
+## ============================================================
+
+addWorksheet(
+  wb,
+  "Splitpunkte"
+)
+
+writeData(
+  wb,
+  "Splitpunkte",
+  CART_Splitpunkte
+)
+
+
+## ============================================================
+## Tabellenblatt 5:
+## CP / Cross-Validation
+## ============================================================
+
+addWorksheet(
+  wb,
+  "CP_Tabellen"
+)
+
+writeData(
+  wb,
+  "CP_Tabellen",
+  CART_CP
+)
+
+
+## ============================================================
+## 32. Excel formatieren
+## ============================================================
+
+headerStyle <- createStyle(
+  textDecoration = "bold"
+)
+
+
+for (
+  sheet_name in names(wb)
+) {
+  
+  addStyle(
+    wb,
+    sheet = sheet_name,
+    style = headerStyle,
+    rows = 1,
+    cols = 1:50,
+    gridExpand = TRUE
+  )
+  
+  freezePane(
+    wb,
+    sheet = sheet_name,
+    firstRow = TRUE
+  )
+  
+  setColWidths(
+    wb,
+    sheet = sheet_name,
+    cols = 1:50,
+    widths = "auto"
+  )
+}
+
+
+## ============================================================
+## 33. Excel speichern
+## ============================================================
+
+saveWorkbook(
+  wb,
+  output_file,
+  overwrite = TRUE
+)
+
+
+cat("\n")
+cat("====================================================\n")
+cat("Excel-Datei wurde erstellt:\n")
+cat(output_file, "\n")
+cat("====================================================\n")
+
+
+## ============================================================
+## 34. Ordner für CART-Grafiken erstellen
+## ============================================================
+
+plot_folder <-
+  "~/LGD CCF Modellierung/Regulatorisch vs Realisiert/CART_CCF_Plots"
+
+
+if (
+  !dir.exists(
+    plot_folder
+  )
+) {
+  
+  dir.create(
+    plot_folder,
+    recursive = TRUE
+  )
+}
+
+
+## ============================================================
+## 35. CART-Bäume als PNG speichern
+##
+## Pro Variable und Gruppe entstehen:
+##
+## *_Staerkster_Bruch.png
+## *_CART_Klassen.png
+## ============================================================
+
+plot_rpart_safe <- function(tree, file_path, title) {
+  
+  png(
+    filename = file_path,
+    width = 1800,
+    height = 1000,
+    res = 160
+  )
+  
+  if (
+    !is.null(tree) &&
+    inherits(tree, "rpart") &&
+    !is.null(tree$frame) &&
+    nrow(tree$frame) > 1
+  ) {
+    
+    plot(
+      tree,
+      uniform = TRUE,
+      margin = 0.12
+    )
+    
+    text(
+      tree,
+      use.n = TRUE,
+      all = TRUE,
+      cex = 0.8
+    )
+    
+  } else {
+    
+    plot.new()
+    
+    text(
+      0.5,
+      0.5,
+      "Kein aussagekräftiger Split möglich",
+      cex = 1.2
+    )
+  }
+  
+  title(main = title)
+  
+  dev.off()
+}
+
+
+for (
+  model_name in names(all_models)
+) {
+  
+  res <-
+    all_models[[model_name]]
+  
+  
+  ## ----------------------------------------------------------
+  ## A. stärkster einzelner Bruch
+  ## ----------------------------------------------------------
+  
+  file_stump <- file.path(
+    plot_folder,
+    paste0(
+      model_name,
+      "_Staerkster_Bruch.png"
+    )
+  )
+  
+  
+  plot_rpart_safe(
+    tree = res$stump,
+    file_path = file_stump,
+    title = paste(
+      "Stärkster CART-Bruch:",
+      model_name
+    )
+  )
+  
+  
+  ## ----------------------------------------------------------
+  ## B. finaler CART-Baum
+  ## ----------------------------------------------------------
+  
+  file_tree <- file.path(
+    plot_folder,
+    paste0(
+      model_name,
+      "_CART_Klassen.png"
+    )
+  )
+  
+  
+  plot_rpart_safe(
+    tree = res$tree,
+    file_path = file_tree,
+    title = paste(
+      "CART-Klassen:",
+      model_name
+    )
+  )
+}
+
+
+cat("\n")
+cat("====================================================\n")
+cat("CART-Grafiken wurden gespeichert unter:\n")
+cat(plot_folder, "\n")
+cat("====================================================\n")
+
+
+## ============================================================
+## 36. Besonders wichtige Ergebnisse direkt anzeigen
+##
+## Hier werden für Nenner_CCF und ZuslIAKonto insbesondere
+## die datengetriebenen Grenzwerte angezeigt.
+## ============================================================
+
+cat("\n")
+cat("====================================================\n")
+cat("WICHTIGSTE NUMERISCHE GRENZWERTE\n")
+cat("====================================================\n")
+
+
+print(
+  CART_Uebersicht %>%
+    filter(
+      Variable %in% c(
+        "Nenner_CCF",
+        "ZuslIAKonto"
+      )
+    ) %>%
+    select(
+      Gruppe,
+      Variable,
+      Anzahl_Faelle,
+      Staerkster_Grenzwert,
+      CCF_Sprung,
+      R2_ein_Split,
+      Anzahl_CART_Klassen,
+      R2_finaler_CART
+    )
+)
+
+
+## ============================================================
+## 37. Kontoklasse separat anzeigen
+##
+## Bei Kontoklasse gibt es keinen Euro-Grenzwert.
+## Hier zeigt CART stattdessen,
+## welche Kontoklassen in unterschiedliche Gruppen fallen.
+## ============================================================
+
+cat("\n")
+cat("====================================================\n")
+cat("CART-AUFTEILUNG KONTOKLASSE\n")
+cat("====================================================\n")
+
+
+print(
+  CART_Staerkster_Bruch %>%
+    filter(
+      Variable == "Kontoklasse"
+    )
+)
+
+
+## ============================================================
+## 38. Ende
+## ============================================================
+
+cat("\n")
+cat("====================================================\n")
+cat("CART-ANALYSE ABGESCHLOSSEN")
+cat("\n")
+cat("====================================================\n")
+
